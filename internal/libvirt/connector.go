@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/capsali/virtumancer/internal/storage"
+	"github.com/capsali/virtumancer-flash/internal/storage"
 	"libvirt.org/go/libvirt"
 )
 

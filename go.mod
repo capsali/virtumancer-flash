@@ -1,4 +1,4 @@
-module github.com/capsali/virtumancer
+module github.com/capsali/virtumancer-flash
 
 go 1.18
 

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/capsali/virtumancer/internal/libvirt"
-	"github.com/capsali/virtumancer/internal/storage"
-	"github.com/capsali/virtumancer/internal/ws"
+	"github.com/capsali/virtumancer-flash/internal/libvirt"
+	"github.com/capsali/virtumancer-flash/internal/storage"
+	"github.com/capsali/virtumancer-flash/internal/ws"
 	"gorm.io/gorm"
 )
 
