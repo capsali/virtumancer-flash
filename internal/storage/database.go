@@ -5,6 +5,18 @@ import (
 	"gorm.io/gorm"
 )
 
+// VMState defines the possible states of a Virtual Machine in Virtumancer.
+type VMState string
+
+const (
+	StateInitialized VMState = "INITIALIZED" // VM created in DB, not yet defined in libvirt.
+	StateActive      VMState = "ACTIVE"      // VM is running.
+	StatePaused      VMState = "PAUSED"      // VM is paused.
+	StateSuspended   VMState = "SUSPENDED"   // VM is suspended (saved to RAM).
+	StateStopped     VMState = "STOPPED"     // VM is not running.
+	StateError       VMState = "ERROR"       // VM is in an unrecoverable error state.
+)
+
 // --- Core Entities ---
 
 // Host represents a libvirt host connection configuration.
@@ -18,11 +30,10 @@ type VirtualMachine struct {
 	gorm.Model
 	HostID          string `gorm:"uniqueIndex:idx_vm_host_name"`
 	Name            string `gorm:"uniqueIndex:idx_vm_host_name"`
-	UUID            string `gorm:"uniqueIndex"`
+	UUID            string `gorm:"uniqueIndex"` // Virtumancer's internal, guaranteed-unique UUID
+	DomainUUID      string `gorm:"uniqueIndex"` // The UUID as reported by libvirt, may not be unique across hosts
 	Description     string
-	State           int    `gorm:"default:-1"` // Caches the last known libvirt.DomainState
-	GraphicsJSON    string // Caches the JSON representation of libvirt.GraphicsInfo
-	HardwareJSON    string // Caches the JSON representation of libvirt.HardwareInfo
+	State           VMState `gorm:"type:varchar(20);default:'STOPPED'"` // Replaces libvirt's int state with a descriptive string.
 	VCPUCount       uint
 	CPUModel        string
 	CPUTopologyJSON string
@@ -61,6 +72,7 @@ type VolumeAttachment struct {
 	gorm.Model
 	VMID       uint
 	VolumeID   uint
+	Volume     Volume
 	DeviceName string // e.g., "vda", "hdb"
 	BusType    string // e.g., "virtio", "sata", "ide"
 	IsReadOnly bool
@@ -71,9 +83,9 @@ type VolumeAttachment struct {
 // Network represents a virtual network or bridge on a host.
 type Network struct {
 	gorm.Model
-	HostID     string
-	Name       string
-	UUID       string `gorm:"uniqueIndex"`
+	HostID     string `gorm:"uniqueIndex:idx_network_host_name"`
+	Name       string `gorm:"uniqueIndex:idx_network_host_name"`
+	UUID       string
 	BridgeName string
 	Mode       string // e.g., 'bridged', 'nat', 'isolated'
 }
@@ -83,6 +95,7 @@ type Port struct {
 	gorm.Model
 	VMID       uint
 	MACAddress string `gorm:"uniqueIndex"`
+	DeviceName string // e.g. "vnet0", "eth0"
 	ModelName  string // e.g., 'virtio', 'e1000'
 	IPAddress  string
 }
@@ -91,7 +104,9 @@ type Port struct {
 type PortBinding struct {
 	gorm.Model
 	PortID    uint
+	Port      Port
 	NetworkID uint
+	Network   Network
 }
 
 // --- Virtual Hardware Management ---
@@ -475,7 +490,5 @@ func InitDB(dataSourceName string) (*gorm.DB, error) {
 
 	return db, nil
 }
-
-
 
 

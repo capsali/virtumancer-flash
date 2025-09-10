@@ -23,7 +23,15 @@ export const useMainStore = defineStore('main', () => {
 
     let ws = null;
 
-    // --- WebSocket and Polling Logic ---
+    // --- WebSocket Logic ---
+
+    function sendMessage(type, payload) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type, payload }));
+        } else {
+            console.error("WebSocket is not connected.");
+        }
+    }
 
     const connectWebSocket = () => {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -34,9 +42,21 @@ export const useMainStore = defineStore('main', () => {
         ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
-                if (message.type === 'refresh') {
-                    console.log('WebSocket received refresh message, refetching hosts.');
-                    fetchHosts();
+                switch (message.type) {
+                    case 'hosts-changed':
+                        console.log('WebSocket received hosts-changed, refetching all hosts.');
+                        fetchHosts();
+                        break;
+                    case 'vms-changed':
+                        console.log(`WebSocket received vms-changed for host ${message.payload.hostId}, refreshing host data.`);
+                        refreshHostData(message.payload.hostId);
+                        break;
+                    case 'vm-stats-updated':
+                        // Directly update the stats ref. The component will check if it's for the current VM.
+                        activeVmStats.value = message.payload;
+                        break;
+                    default:
+                        console.log('Received unhandled WebSocket message type:', message.type);
                 }
             } catch (e) {
                 console.error("Failed to parse websocket message", e);
@@ -57,6 +77,32 @@ export const useMainStore = defineStore('main', () => {
     };
 
     // --- Host Actions ---
+
+    const refreshHostData = async (hostId) => {
+        const hostIndex = hosts.value.findIndex(h => h.id === hostId);
+        if (hostIndex === -1) {
+            console.warn(`Host ${hostId} not found in state during refresh, performing full fetch.`);
+            fetchHosts();
+            return;
+        }
+
+        // Fetch new data for the specific host
+        const [vms, info] = await Promise.all([
+            fetchVmsForHost(hostId),
+            fetchHostInfo(hostId)
+        ]);
+        
+        // Create a new host object to ensure reactivity
+        const updatedHost = {
+            ...hosts.value[hostIndex],
+            vms,
+            info,
+        };
+
+        // Replace the old host object with the new one
+        hosts.value.splice(hostIndex, 1, updatedHost);
+    };
+
 
     const fetchHosts = async () => {
         isLoading.value.hosts = true;
@@ -107,7 +153,7 @@ export const useMainStore = defineStore('main', () => {
                 const errorText = await response.text();
                 throw new Error(errorText || `HTTP error! status: ${response.status}`);
             }
-            // No need to call fetchHosts here, the websocket will trigger it
+            // The websocket will trigger a full refresh
         } catch (error) {
             errorMessage.value = `Failed to add host: ${error.message}`;
             console.error(error);
@@ -127,7 +173,7 @@ export const useMainStore = defineStore('main', () => {
             if (selectedHostId.value === hostId) {
                 selectedHostId.value = null;
             }
-            // No need to call fetchHosts here, the websocket will trigger it
+             // The websocket will trigger a full refresh
         } catch (error) {
             errorMessage.value = `Failed to delete host: ${error.message}`;
             console.error(error);
@@ -153,19 +199,16 @@ export const useMainStore = defineStore('main', () => {
         }
     };
 
-    const fetchVmStats = async (hostId, vmName) => {
-        if (!hostId || !vmName) {
-            activeVmStats.value = null;
-            return;
-        }
-        try {
-            const response = await fetch(`/api/v1/hosts/${hostId}/vms/${vmName}/stats`);
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            activeVmStats.value = await response.json();
-        } catch (error) {
-            console.error(`Failed to fetch stats for VM ${vmName}:`, error);
-            activeVmStats.value = null;
-        }
+    const subscribeToVmStats = (hostId, vmName) => {
+        if (!hostId || !vmName) return;
+        sendMessage('subscribe-vm-stats', { hostId, vmName });
+    };
+
+    const unsubscribeFromVmStats = (hostId, vmName) => {
+        if (!hostId || !vmName) return;
+        // Clear last known stats to prevent showing stale data on next view
+        activeVmStats.value = null; 
+        sendMessage('unsubscribe-vm-stats', { hostId, vmName });
     };
 
     const fetchVmHardware = async (hostId, vmName) => {
@@ -223,15 +266,15 @@ export const useMainStore = defineStore('main', () => {
         addHost,
         deleteHost,
         selectHost,
-        fetchVmStats,
         fetchVmHardware,
         startVm,
         gracefulShutdownVm,
         gracefulRebootVm,
         forceOffVm,
         forceResetVm,
+        subscribeToVmStats,
+        unsubscribeFromVmStats,
     };
 });
-
 
 

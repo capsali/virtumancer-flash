@@ -1,107 +1,195 @@
-# Virtumancer API Documentation
+# **Virtumancer API Documentation**
 
-This document outlines the RESTful API endpoints for the Virtumancer application.
+Virtumancer exposes a RESTful HTTP API for management operations and a WebSocket API for real-time updates and monitoring.
 
-**Base URL:** `/api/v1`
+## **REST API**
 
----
+Base URL: /api
 
-## Hosts
+### **Host Management**
 
-### `GET /hosts`
+#### **GET /api/hosts**
 
-* **Description:** Retrieves a list of all configured libvirt hosts from the database.
-* **Returns:** `200 OK` with a JSON array of `Host` objects.
-    ```json
-    [
-      {
-        "id": "proxmox-1",
-        "uri": "qemu+ssh://root@192.168.1.10/system"
-      }
-    ]
-    ```
+* **Description**: Retrieves a list of all configured hosts from the database.  
+* **Response**: 200 OK  
+  \[  
+    {  
+      "id": "kvmsrv",  
+      "uri": "qemu+ssh://user@host/system",  
+      "created\_at": "2023-10-27T10:00:00Z"  
+    }  
+  \]
 
-### `POST /hosts`
+#### **POST /api/hosts**
 
-* **Description:** Adds a new libvirt host, connects to it, and saves it to the database.
-* **Body:** A JSON `Host` object.
-    ```json
-    {
-      "id": "proxmox-2",
-      "uri": "qemu+ssh://root@192.168.1.11/system"
-    }
-    ```
-* **Returns:** `201 Created` with the newly created `Host` object.
+* **Description**: Adds a new host, connects to it, and stores it in the database.  
+* **Request Body**:  
+  {  
+    "id": "new-kvm-host",  
+    "uri": "qemu+ssh://user@new-host/system"  
+  }
 
-### `GET /hosts/{hostID}/info`
+* **Response**: 200 OK on success, with the created host object. 500 Internal Server Error if the connection fails.
 
-* **Description:** Retrieves real-time statistics for a specific host.
-* **URL Parameters:**
-    * `hostID` (string): The unique ID of the host.
-* **Returns:** `200 OK` with a `HostInfo` JSON object.
+#### **DELETE /api/hosts/:id**
 
-### `DELETE /hosts/{hostID}`
+* **Description**: Disconnects from a host and removes it from the database.  
+* **URL Parameters**:  
+  * id (string): The ID of the host to remove.  
+* **Response**: 204 No Content
 
-* **Description:** Disconnects from and deletes a host from the database.
-* **URL Parameters:**
-    * `hostID` (string): The unique ID of the host.
-* **Returns:** `204 No Content`.
+#### **GET /api/hosts/:id/info**
 
----
+* **Description**: Retrieves real-time information and statistics about a specific host (CPU, memory, etc.).  
+* **URL Parameters**:  
+  * id (string): The ID of the host.  
+* **Response**: 200 OK  
+  {  
+    "hostname": "kvm-host-01",  
+    "cpu": 8,  
+    "memory": 16777216000,  
+    "cores": 4,  
+    "threads": 2  
+  }
 
-## Virtual Machines
+### **Virtual Machine Management**
 
-### `GET /hosts/{hostID}/vms`
+#### **GET /api/hosts/:id/vms**
 
-* **Description:** Retrieves a real-time list of all virtual machines (domains) from a specific host via libvirt and syncs them to the local database.
-* **URL Parameters:**
-    * `hostID` (string): The unique ID of the host.
-* **Returns:** `200 OK` with a JSON array of `VMInfo` objects.
+* **Description**: Retrieves a list of all virtual machines on a specific host from the local database cache.  
+* **URL Parameters**:  
+  * id (string): The ID of the host.  
+* **Response**: 200 OK  
+  \[  
+    {  
+      "db\_id": 1,  
+      "name": "ubuntu-vm-01",  
+      "description": "",  
+      "vcpu\_count": 2,  
+      "memory\_bytes": 2147483648,  
+      "state": 1,  
+      "graphics": {  
+        "vnc": true,  
+        "spice": false  
+      }  
+    }  
+  \]
 
-### `GET /hosts/{hostID}/vms/db`
+#### **GET /api/hosts/:hostId/vms/:vmName/hardware**
 
-* **Description:** Retrieves the list of virtual machines for a host from the local database.
-* **URL Parameters:**
-    * `hostID` (string): The unique ID of the host.
-* **Returns:** `200 OK` with a JSON array of `VirtualMachine` objects from the database.
+* **Description**: Retrieves the hardware configuration for a specific VM. This triggers a fresh sync from libvirt before returning the cached data.  
+* **URL Parameters**:  
+  * hostId (string): The ID of the host.  
+  * vmName (string): The name of the virtual machine.  
+* **Response**: 200 OK  
+  {  
+    "disks": \[  
+      {  
+        "type": "file",  
+        "device": "disk",  
+        "driver": { "driver\_name": "qemu", "type": "qcow2" },  
+        "path": "/path/to/disk.qcow2",  
+        "target": { "dev": "vda", "bus": "virtio" }  
+      }  
+    \],  
+    "networks": \[  
+      {  
+        "type": "bridge",  
+        "mac": { "address": "52:54:00:11:22:33" },  
+        "source": { "bridge": "br0" },  
+        "model": { "model\_type": "virtio" }  
+      }  
+    \]  
+  }
 
-### `GET /hosts/{hostID}/vms/{vmName}/stats`
+#### **POST /api/hosts/:hostId/vms/:vmName/action**
 
-* **Description:** Retrieves real-time performance statistics for a single VM.
-* **URL Parameters:**
-    * `hostID` (string): The host of the VM.
-    * `vmName` (string): The name of the VM.
-* **Returns:** `200 OK` with a `VMStats` JSON object.
+* **Description**: Performs a power action on a specific VM.  
+* **URL Parameters**:  
+  * hostId (string): The ID of the host.  
+  * vmName (string): The name of the virtual machine.  
+* **Request Body**:  
+  {  
+    "action": "start"  
+  }
 
-### `GET /hosts/{hostID}/vms/{vmName}/hardware`
+  * **Valid actions**: start, shutdown, reboot, destroy (force off), reset (force reset).  
+* **Response**: 204 No Content
 
-* **Description:** Retrieves the hardware configuration for a single VM.
-* **URL Parameters:**
-    * `hostID` (string): The host of the VM.
-    * `vmName` (string): The name of the VM.
-* **Returns:** `200 OK` with a `HardwareInfo` JSON object.
+## **WebSocket API**
 
-### VM Actions
+The WebSocket API is used for real-time notifications and statistics monitoring.
 
-* **Endpoint Pattern:** `POST /hosts/{hostID}/vms/{vmName}/{action}`
-* **URL Parameters:**
-    * `hostID` (string): The host of the VM.
-    * `vmName` (string): The name of the VM.
-    * `action` (string): The action to perform. Can be `start`, `shutdown`, `reboot`, `forceoff`, or `forcereset`.
-* **Returns:** `204 No Content` on success.
+* **Connection URL**: /ws
 
----
+### **Client-to-Server Messages**
 
-## WebSockets
+Messages are sent as JSON objects with type and payload fields.
 
-### `GET /ws`
+#### **subscribe-vm-stats**
 
-* **Description:** Establishes a WebSocket connection for receiving real-time UI updates. The backend sends a `{"type": "refresh"}` message whenever the frontend should refetch data.
+* **Description**: Subscribes the client to real-time statistics updates for a specific VM. The server will start polling the VM and broadcasting vm-stats-updated messages.  
+* **Payload**:  
+  {  
+    "type": "subscribe-vm-stats",  
+    "payload": {  
+      "hostId": "kvmsrv",  
+      "vmName": "ubuntu-vm-01"  
+    }  
+  }
 
-### `GET /hosts/{hostID}/vms/{vmName}/console`
+#### **unsubscribe-vm-stats**
 
-* **Description:** Establishes a WebSocket connection and proxies it to the VM's VNC console. Uses the `binary` subprotocol.
+* **Description**: Unsubscribes the client from a VM's statistics updates. If no clients are left subscribed, the server will stop polling.  
+* **Payload**:  
+  {  
+    "type": "unsubscribe-vm-stats",  
+    "payload": {  
+      "hostId": "kvmsrv",  
+      "vmName": "ubuntu-vm-01"  
+    }  
+  }
 
-### `GET /hosts/{hostID}/vms/{vmName}/spice`
+### **Server-to-Client Messages**
 
-* **Description:** Establishes a WebSocket connection and proxies it to the VM's SPICE console. Uses the `binary` subprotocol.
+#### **hosts-changed**
+
+* **Description**: Sent whenever a host is added or removed. The client should re-fetch the list of hosts via GET /api/hosts.  
+* **Payload**: null
+
+#### **vms-changed**
+
+* **Description**: Sent whenever the list of VMs on a host has changed (e.g., a VM was added, removed, or its state changed after a power operation). The client should re-fetch the VM list for the specified host.  
+* **Payload**:  
+  {  
+    "type": "vms-changed",  
+    "payload": {  
+      "hostId": "kvmsrv"  
+    }  
+  }
+
+#### **vm-stats-updated**
+
+* **Description**: Broadcast periodically to all subscribed clients for a specific VM.  
+* **Payload**:  
+  {  
+    "type": "vm-stats-updated",  
+    "payload": {  
+      "hostId": "kvmsrv",  
+      "vmName": "ubuntu-vm-01",  
+      "stats": {  
+        "state": 1,  
+        "memory": 2097152,  
+        "max\_mem": 2097152,  
+        "vcpu": 2,  
+        "cpu\_time": 1234567890,  
+        "disk\_stats": \[  
+          { "device": "vda", "read\_bytes": 1024, "write\_bytes": 2048 }  
+        \],  
+        "net\_stats": \[  
+          { "device": "vnet0", "read\_bytes": 4096, "write\_bytes": 8192 }  
+        \]  
+      }  
+    }  
+  }  
+

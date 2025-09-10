@@ -4,23 +4,23 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/capsali/virtumancer-flash/internal/console"
-	"github.com/capsali/virtumancer-flash/internal/libvirt"
-	"github.com/capsali/virtumancer-flash/internal/services"
-	"github.com/capsali/virtumancer-flash/internal/storage"
-	"github.com/capsali/virtumancer-flash/internal/ws"
+	"github.com/capsali/virtumancer/internal/console"
+	"github.com/capsali/virtumancer/internal/libvirt"
+	"github.com/capsali/virtumancer/internal/services"
+	"github.com/capsali/virtumancer/internal/storage"
+	"github.com/capsali/virtumancer/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
 
 type APIHandler struct {
-	HostService *services.HostService
+	HostService services.HostServiceProvider
 	Hub         *ws.Hub
 	DB          *gorm.DB
 	Connector   *libvirt.Connector
 }
 
-func NewAPIHandler(hostService *services.HostService, hub *ws.Hub, db *gorm.DB, connector *libvirt.Connector) *APIHandler {
+func NewAPIHandler(hostService services.HostServiceProvider, hub *ws.Hub, db *gorm.DB, connector *libvirt.Connector) *APIHandler {
 	return &APIHandler{
 		HostService: hostService,
 		Hub:         hub,
@@ -30,7 +30,7 @@ func NewAPIHandler(hostService *services.HostService, hub *ws.Hub, db *gorm.DB, 
 }
 
 func (h *APIHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	ws.ServeWs(h.Hub, w, r)
+	ws.ServeWs(h.Hub, h.HostService, w, r)
 }
 
 func (h *APIHandler) HandleVMConsole(w http.ResponseWriter, r *http.Request) {
@@ -190,8 +190,5 @@ func (h *APIHandler) ForceResetVM(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-
-
-
 
 

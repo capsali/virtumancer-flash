@@ -4,12 +4,17 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/capsali/virtumancer-flash/internal/storage"
-	"libvirt.org/go/libvirt"
+	"github.com/capsali/virtumancer/internal/storage"
+	"github.com/digitalocean/go-libvirt"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
 )
 
 // GraphicsInfo holds details about available graphics consoles.
@@ -120,14 +125,125 @@ type HostInfo struct {
 
 // Connector manages active connections to libvirt hosts.
 type Connector struct {
-	connections map[string]*libvirt.Connect
+	connections map[string]*libvirt.Libvirt
 	mu          sync.RWMutex
 }
 
 // NewConnector creates a new libvirt connection manager.
 func NewConnector() *Connector {
 	return &Connector{
-		connections: make(map[string]*libvirt.Connect),
+		connections: make(map[string]*libvirt.Libvirt),
+	}
+}
+
+// sshKeyAuth provides an AuthMethod for key-based SSH authentication
+// by reading the user's default private key.
+func sshKeyAuth() (ssh.AuthMethod, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not get user home directory: %w", err)
+	}
+
+	keyPath := filepath.Join(home, ".ssh", "id_rsa")
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read private key from %s: %w. Ensure SSH key-based auth is set up", keyPath, err)
+	}
+
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse private key: %w", err)
+	}
+
+	return ssh.PublicKeys(signer), nil
+}
+
+// sshTunneledConn wraps a net.Conn to ensure the underlying SSH client is also closed.
+type sshTunneledConn struct {
+	net.Conn
+	client *ssh.Client
+}
+
+func (c *sshTunneledConn) Close() error {
+	connErr := c.Conn.Close()
+	clientErr := c.client.Close()
+	if connErr != nil {
+		return connErr
+	}
+	return clientErr
+}
+
+// dialLibvirt establishes a network connection based on the URI.
+func dialLibvirt(uri string) (net.Conn, error) {
+	parsedURI, err := url.Parse(uri)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URI: %w", err)
+	}
+
+	switch parsedURI.Scheme {
+	case "qemu+ssh":
+		user := "root" // default user
+		if parsedURI.User != nil {
+			user = parsedURI.User.Username()
+		}
+
+		host := parsedURI.Hostname()
+		port := parsedURI.Port()
+		if port == "" {
+			port = "22" // default ssh port
+		}
+		sshAddr := fmt.Sprintf("%s:%s", host, port)
+
+		authMethod, err := sshKeyAuth()
+		if err != nil {
+			return nil, fmt.Errorf("SSH key authentication setup failed: %w", err)
+		}
+
+		sshConfig := &ssh.ClientConfig{
+			User: user,
+			Auth: []ssh.AuthMethod{
+				authMethod,
+			},
+			// Insecure: fine for this tool where hosts are explicitly added.
+			// Production systems might use a known_hosts file.
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		}
+
+		log.Printf("Attempting SSH connection to %s for user %s", sshAddr, user)
+		sshClient, err := ssh.Dial("tcp", sshAddr, sshConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to dial SSH to %s: %w", sshAddr, err)
+		}
+
+		// Dial the libvirt socket on the remote machine through the SSH tunnel.
+		remoteSocketPath := "/var/run/libvirt/libvirt-sock"
+		log.Printf("SSH connected. Dialing remote libvirt socket at %s", remoteSocketPath)
+		conn, err := sshClient.Dial("unix", remoteSocketPath)
+		if err != nil {
+			sshClient.Close()
+			return nil, fmt.Errorf("failed to dial remote libvirt socket (%s) via SSH: %w", remoteSocketPath, err)
+		}
+		return &sshTunneledConn{
+			Conn:   conn,
+			client: sshClient,
+		}, nil
+
+	case "qemu+tcp":
+		address := parsedURI.Host
+		if !strings.Contains(address, ":") {
+			address = address + ":16509" // Default libvirt tcp port
+		}
+		return net.Dial("tcp", address)
+
+	case "qemu", "qemu+unix":
+		address := parsedURI.Path
+		if address == "" || address == "/system" {
+			address = "/var/run/libvirt/libvirt-sock"
+		}
+		return net.Dial("unix", address)
+
+	default:
+		return nil, fmt.Errorf("unsupported scheme: %s", parsedURI.Scheme)
 	}
 }
 
@@ -140,24 +256,18 @@ func (c *Connector) AddHost(host storage.Host) error {
 		return fmt.Errorf("host '%s' is already connected", host.ID)
 	}
 
-	connectURI := host.URI
-	parsedURI, err := url.Parse(host.URI)
-	if err == nil && parsedURI.Scheme == "qemu+ssh" {
-		q := parsedURI.Query()
-		if q.Get("no_verify") == "" {
-			q.Set("no_verify", "1")
-			parsedURI.RawQuery = q.Encode()
-			connectURI = parsedURI.String()
-			log.Printf("Amended URI for %s to %s for non-interactive connection", host.ID, connectURI)
-		}
-	}
-
-	conn, err := libvirt.NewConnect(connectURI)
+	conn, err := dialLibvirt(host.URI)
 	if err != nil {
-		return fmt.Errorf("failed to connect to host '%s' using URI %s: %w", host.ID, connectURI, err)
+		return fmt.Errorf("failed to dial libvirt for host '%s': %w", host.ID, err)
 	}
 
-	c.connections[host.ID] = conn
+	l := libvirt.New(conn)
+	if err := l.Connect(); err != nil {
+		conn.Close() // Ensure the connection is closed on failure
+		return fmt.Errorf("failed to connect to libvirt rpc for host '%s': %w", host.ID, err)
+	}
+
+	c.connections[host.ID] = l
 	log.Printf("Successfully connected to host: %s", host.ID)
 	return nil
 }
@@ -167,12 +277,12 @@ func (c *Connector) RemoveHost(hostID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	conn, ok := c.connections[hostID]
+	l, ok := c.connections[hostID]
 	if !ok {
 		return fmt.Errorf("host '%s' not found", hostID)
 	}
 
-	if _, err := conn.Close(); err != nil {
+	if err := l.Disconnect(); err != nil {
 		return fmt.Errorf("failed to close connection to host '%s': %w", hostID, err)
 	}
 
@@ -182,7 +292,7 @@ func (c *Connector) RemoveHost(hostID string) error {
 }
 
 // GetConnection returns the active connection for a given host ID.
-func (c *Connector) GetConnection(hostID string) (*libvirt.Connect, error) {
+func (c *Connector) GetConnection(hostID string) (*libvirt.Libvirt, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -195,27 +305,27 @@ func (c *Connector) GetConnection(hostID string) (*libvirt.Connect, error) {
 
 // GetHostInfo retrieves statistics about the host itself.
 func (c *Connector) GetHostInfo(hostID string) (*HostInfo, error) {
-	conn, err := c.GetConnection(hostID)
+	l, err := c.GetConnection(hostID)
 	if err != nil {
 		return nil, err
 	}
 
-	nodeInfo, err := conn.GetNodeInfo()
+	_, memory, cpus, _, _, _, cores, threads, err := l.NodeGetInfo()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node info for host %s: %w", hostID, err)
 	}
 
-	hostname, err := conn.GetHostname()
+	hostname, err := l.ConnectGetHostname()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get hostname for host %s: %w", hostID, err)
 	}
 
 	return &HostInfo{
 		Hostname: hostname,
-		CPU:      nodeInfo.Cpus,
-		Memory:   nodeInfo.Memory,
-		Cores:    uint(nodeInfo.Cores),
-		Threads:  uint(nodeInfo.Threads),
+		CPU:      uint(cpus),
+		Memory:   uint64(memory) * 1024, // The library returns KiB, we want Bytes
+		Cores:    uint(cores),
+		Threads:  uint(threads),
 	}, nil
 }
 
@@ -252,30 +362,24 @@ func parseGraphicsFromXML(xmlDesc string) (GraphicsInfo, error) {
 
 // ListAllDomains lists all domains (VMs) on a specific host.
 func (c *Connector) ListAllDomains(hostID string) ([]VMInfo, error) {
-	conn, err := c.GetConnection(hostID)
+	l, err := c.GetConnection(hostID)
 	if err != nil {
 		return nil, err
 	}
 
-	domains, err := conn.ListAllDomains(libvirt.CONNECT_LIST_DOMAINS_ACTIVE | libvirt.CONNECT_LIST_DOMAINS_INACTIVE)
+	domains, err := l.Domains()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list domains: %w", err)
 	}
 
 	var vms []VMInfo
-	for i := range domains {
-		domain := &domains[i]
-
-		vmInfo, err := c.domainToVMInfo(domain)
+	for _, domain := range domains {
+		vmInfo, err := c.domainToVMInfo(l, domain)
 		if err != nil {
-			name, _ := domain.GetName()
-			log.Printf("Warning: could not get info for domain %s on host %s: %v", name, hostID, err)
-			domain.Free()
+			log.Printf("Warning: could not get info for domain %s on host %s: %v", domain.Name, hostID, err)
 			continue
 		}
-
 		vms = append(vms, *vmInfo)
-		domain.Free()
 	}
 
 	return vms, nil
@@ -283,53 +387,43 @@ func (c *Connector) ListAllDomains(hostID string) ([]VMInfo, error) {
 
 // GetDomainInfo retrieves information for a single domain.
 func (c *Connector) GetDomainInfo(hostID, vmName string) (*VMInfo, error) {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return nil, err
 	}
-	defer domain.Free()
-
-	return c.domainToVMInfo(domain)
+	return c.domainToVMInfo(l, domain)
 }
 
 // domainToVMInfo is a helper to convert a libvirt.Domain object to our VMInfo struct.
-func (c *Connector) domainToVMInfo(domain *libvirt.Domain) (*VMInfo, error) {
-	name, err := domain.GetName()
+func (c *Connector) domainToVMInfo(l *libvirt.Libvirt, domain libvirt.Domain) (*VMInfo, error) {
+	stateInt, _, err := l.DomainGetState(domain, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get domain state for %s: %w", domain.Name, err)
 	}
-	uuid, err := domain.GetUUIDString()
+	state := libvirt.DomainState(stateInt)
+
+	_, maxMem, memory, nrVirtCPU, cpuTime, err := l.DomainGetInfo(domain)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get domain info for %s: %w", domain.Name, err)
 	}
-	id, err := domain.GetID()
-	if err != nil {
-		id = 0 // Not running
-	}
-	state, _, err := domain.GetState()
-	if err != nil {
-		return nil, err
-	}
-	info, err := domain.GetInfo()
-	if err != nil {
-		return nil, err
-	}
+
 	var uptime int64 = -1
-	if state == libvirt.DOMAIN_RUNNING {
-		timeVal, _, err := domain.GetTime(0)
+	if state == libvirt.DomainRunning {
+		seconds, nanoseconds, err := l.DomainGetTime(domain, 0)
 		if err == nil {
-			uptime = timeVal
+			uptime = int64(seconds) + int64(nanoseconds)/1_000_000_000
 		}
 	}
-	isPersistent, err := domain.IsPersistent()
+
+	persistent, err := l.DomainIsPersistent(domain)
 	if err != nil {
-		isPersistent = false
+		persistent = 0
 	}
-	autostart, err := domain.GetAutostart()
+	autostart, err := l.DomainGetAutostart(domain)
 	if err != nil {
-		autostart = false
+		autostart = 0
 	}
-	xmlDesc, err := domain.GetXMLDesc(0)
+	xmlDesc, err := l.DomainGetXMLDesc(domain, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -338,54 +432,65 @@ func (c *Connector) domainToVMInfo(domain *libvirt.Domain) (*VMInfo, error) {
 		return nil, err
 	}
 
+	var uuidStr string
+	// The domain.UUID is a [16]byte array. We need to convert it to a slice to use uuid.FromBytes
+	parsedUUID, err := uuid.FromBytes(domain.UUID[:])
+	if err != nil {
+		// This should not happen if libvirt provides a valid 16-byte UUID, but we handle it defensively.
+		log.Printf("Warning: could not parse domain UUID for %s: %v. Using raw hex.", domain.Name, err)
+		uuidStr = fmt.Sprintf("%x", domain.UUID)
+	} else {
+		uuidStr = parsedUUID.String()
+	}
+
 	return &VMInfo{
-		ID:         uint32(id),
-		UUID:       uuid,
-		Name:       name,
+		ID:         uint32(domain.ID),
+		UUID:       uuidStr,
+		Name:       domain.Name,
 		State:      state,
-		MaxMem:     info.MaxMem,
-		Memory:     info.Memory,
-		Vcpu:       uint(info.NrVirtCpu),
-		CpuTime:    info.CpuTime,
+		MaxMem:     uint64(maxMem),
+		Memory:     uint64(memory),
+		Vcpu:       uint(nrVirtCPU),
+		CpuTime:    cpuTime,
 		Uptime:     uptime,
-		Persistent: isPersistent,
-		Autostart:  autostart,
+		Persistent: persistent == 1,
+		Autostart:  autostart == 1,
 		Graphics:   graphics,
 	}, nil
 }
 
 // GetDomainStats retrieves real-time statistics for a single domain (VM).
 func (c *Connector) GetDomainStats(hostID, vmName string) (*VMStats, error) {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return nil, err
 	}
-	defer domain.Free()
 
-	state, _, err := domain.GetState()
+	stateInt, _, err := l.DomainGetState(domain, 0)
 	if err != nil {
 		return nil, fmt.Errorf("could not get state for domain %s: %w", vmName, err)
 	}
+	state := libvirt.DomainState(stateInt)
 
-	info, err := domain.GetInfo()
+	_, maxMem, memory, nrVirtCPU, cpuTime, err := l.DomainGetInfo(domain)
 	if err != nil {
 		return nil, fmt.Errorf("could not get info for domain %s: %w", vmName, err)
 	}
 
 	// If not running, return basic info without I/O stats
-	if state != libvirt.DOMAIN_RUNNING {
+	if state != libvirt.DomainRunning {
 		return &VMStats{
 			State:     state,
 			Memory:    0,
-			MaxMem:    info.MaxMem,
-			Vcpu:      uint(info.NrVirtCpu),
+			MaxMem:    uint64(maxMem),
+			Vcpu:      uint(nrVirtCPU),
 			CpuTime:   0,
 			DiskStats: []DomainDiskStats{},
 			NetStats:  []DomainNetworkStats{},
 		}, nil
 	}
 
-	xmlDesc, err := domain.GetXMLDesc(0)
+	xmlDesc, err := l.DomainGetXMLDesc(domain, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get XML for %s to find devices: %w", vmName, err)
 	}
@@ -400,15 +505,18 @@ func (c *Connector) GetDomainStats(hostID, vmName string) (*VMStats, error) {
 		if disk.Target.Dev == "" {
 			continue
 		}
-		stats, err := domain.BlockStats(disk.Target.Dev)
+		rdReq, rdBytes, wrReq, wrBytes, errs, err := l.DomainBlockStats(domain, disk.Target.Dev)
 		if err != nil {
 			log.Printf("Warning: could not get block stats for device %s on VM %s: %v", disk.Target.Dev, vmName, err)
 			continue
 		}
+		_ = rdReq // Suppress unused variable warning
+		_ = wrReq // Suppress unused variable warning
+		_ = errs  // Suppress unused variable warning
 		diskStats = append(diskStats, DomainDiskStats{
 			Device:     disk.Target.Dev,
-			ReadBytes:  stats.RdBytes,
-			WriteBytes: stats.WrBytes,
+			ReadBytes:  rdBytes,
+			WriteBytes: wrBytes,
 		})
 	}
 
@@ -417,24 +525,24 @@ func (c *Connector) GetDomainStats(hostID, vmName string) (*VMStats, error) {
 		if iface.Target.Dev == "" {
 			continue
 		}
-		stats, err := domain.InterfaceStats(iface.Target.Dev)
+		rxBytes, _, _, _, txBytes, _, _, _, err := l.DomainInterfaceStats(domain, iface.Target.Dev)
 		if err != nil {
 			log.Printf("Warning: could not get interface stats for device %s on VM %s: %v", iface.Target.Dev, vmName, err)
 			continue
 		}
 		netStats = append(netStats, DomainNetworkStats{
 			Device:     iface.Target.Dev,
-			ReadBytes:  stats.RxBytes,
-			WriteBytes: stats.TxBytes,
+			ReadBytes:  int64(rxBytes),
+			WriteBytes: int64(txBytes),
 		})
 	}
 
 	stats := &VMStats{
 		State:      state,
-		Memory:     info.Memory,
-		MaxMem:     info.MaxMem,
-		Vcpu:       uint(info.NrVirtCpu),
-		CpuTime:    info.CpuTime,
+		Memory:     uint64(memory),
+		MaxMem:     uint64(maxMem),
+		Vcpu:       uint(nrVirtCPU),
+		CpuTime:    cpuTime,
 		DiskStats:  diskStats,
 		NetStats:   netStats,
 	}
@@ -444,13 +552,12 @@ func (c *Connector) GetDomainStats(hostID, vmName string) (*VMStats, error) {
 
 // GetDomainHardware retrieves the hardware configuration for a single domain (VM).
 func (c *Connector) GetDomainHardware(hostID, vmName string) (*HardwareInfo, error) {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return nil, err
 	}
-	defer domain.Free()
 
-	xmlDesc, err := domain.GetXMLDesc(0)
+	xmlDesc, err := l.DomainGetXMLDesc(domain, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get XML for %s to read hardware: %w", vmName, err)
 	}
@@ -479,61 +586,55 @@ func (c *Connector) GetDomainHardware(hostID, vmName string) (*HardwareInfo, err
 
 // --- VM Actions ---
 
-func (c *Connector) getDomainByName(hostID, vmName string) (*libvirt.Domain, error) {
-	conn, err := c.GetConnection(hostID)
+func (c *Connector) getDomainByName(hostID, vmName string) (*libvirt.Libvirt, libvirt.Domain, error) {
+	l, err := c.GetConnection(hostID)
 	if err != nil {
-		return nil, err
+		return nil, libvirt.Domain{}, err
 	}
-	domain, err := conn.LookupDomainByName(vmName)
+	domain, err := l.DomainLookupByName(vmName)
 	if err != nil {
-		return nil, fmt.Errorf("could not find VM '%s' on host '%s': %w", vmName, hostID, err)
+		return nil, libvirt.Domain{}, fmt.Errorf("could not find VM '%s' on host '%s': %w", vmName, hostID, err)
 	}
-	return domain, nil
+	return l, domain, nil
 }
 
 func (c *Connector) StartDomain(hostID, vmName string) error {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return err
 	}
-	defer domain.Free()
-	return domain.Create()
+	return l.DomainCreate(domain)
 }
 
 func (c *Connector) ShutdownDomain(hostID, vmName string) error {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return err
 	}
-	defer domain.Free()
-	return domain.Shutdown()
+	return l.DomainShutdown(domain)
 }
 
 func (c *Connector) RebootDomain(hostID, vmName string) error {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return err
 	}
-	defer domain.Free()
-	return domain.Reboot(0)
+	return l.DomainReboot(domain, 0)
 }
 
 func (c *Connector) DestroyDomain(hostID, vmName string) error {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return err
 	}
-	defer domain.Free()
-	return domain.Destroy()
+	return l.DomainDestroy(domain)
 }
 
 func (c *Connector) ResetDomain(hostID, vmName string) error {
-	domain, err := c.getDomainByName(hostID, vmName)
+	l, domain, err := c.getDomainByName(hostID, vmName)
 	if err != nil {
 		return err
 	}
-	defer domain.Free()
-	return domain.Reset(0)
+	return l.DomainReset(domain, 0)
 }
-
 

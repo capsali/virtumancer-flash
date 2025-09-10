@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -31,6 +32,13 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// InboundMessageHandler is an interface for handling messages from a client.
+type InboundMessageHandler interface {
+	HandleSubscribe(client *Client, payload MessagePayload)
+	HandleUnsubscribe(client *Client, payload MessagePayload)
+	HandleClientDisconnect(client *Client)
+}
+
 // Client is a middleman between the websocket connection and the hub.
 type Client struct {
 	hub *Hub
@@ -40,11 +48,15 @@ type Client struct {
 
 	// Buffered channel of outbound messages.
 	send chan []byte
+
+	// A handler for inbound messages, typically the HostService.
+	handler InboundMessageHandler
 }
 
-// readPump pumps messages from the websocket connection to the hub.
+// readPump pumps messages from the websocket connection to the handler.
 func (c *Client) readPump() {
 	defer func() {
+		c.handler.HandleClientDisconnect(c)
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
@@ -52,15 +64,28 @@ func (c *Client) readPump() {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
-		_, _, err := c.conn.ReadMessage()
+		_, messageBytes, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
 			break
 		}
-		// We don't need to process inbound messages from the client for now,
-		// but this is where you would handle them if you did.
+
+		var msg Message
+		if err := json.Unmarshal(messageBytes, &msg); err != nil {
+			log.Printf("Could not unmarshal inbound websocket message: %v", err)
+			continue
+		}
+
+		switch msg.Type {
+		case "subscribe-vm-stats":
+			c.handler.HandleSubscribe(c, msg.Payload)
+		case "unsubscribe-vm-stats":
+			c.handler.HandleUnsubscribe(c, msg.Payload)
+		default:
+			log.Printf("Received unknown websocket message type: %s", msg.Type)
+		}
 	}
 }
 
@@ -100,13 +125,13 @@ func (c *Client) writePump() {
 }
 
 // ServeWs handles websocket requests from the peer.
-func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+func ServeWs(hub *Hub, handler InboundMessageHandler, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
+	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256), handler: handler}
 	client.hub.register <- client
 
 	// Allow collection of memory referenced by the caller by doing all work in

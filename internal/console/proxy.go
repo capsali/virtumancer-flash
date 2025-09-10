@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/capsali/virtumancer-flash/internal/libvirt"
-	"github.com/capsali/virtumancer-flash/internal/storage"
+	"github.com/capsali/virtumancer/internal/libvirt"
+	"github.com/capsali/virtumancer/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
@@ -115,15 +115,14 @@ func HandleConsole(db *gorm.DB, connector *libvirt.Connector, w http.ResponseWri
 	}
 
 	// Find the domain (VM)
-	domain, err := lvConn.LookupDomainByName(vmName)
+	domain, err := lvConn.DomainLookupByName(vmName)
 	if err != nil {
 		log.Printf("Console proxy error: could not find VM %s on host %s: %v", vmName, hostID, err)
 		return
 	}
-	defer domain.Free()
 
 	// Get the VM's XML definition to find graphics details
-	xmlDesc, err := domain.GetXMLDesc(0)
+	xmlDesc, err := lvConn.DomainGetXMLDesc(domain, 0)
 	if err != nil {
 		log.Printf("Console proxy error: failed to get XML for %s: %v", vmName, err)
 		return
@@ -241,15 +240,14 @@ func HandleSpiceConsole(db *gorm.DB, connector *libvirt.Connector, w http.Respon
 	}
 
 	// Find the domain (VM)
-	domain, err := lvConn.LookupDomainByName(vmName)
+	domain, err := lvConn.DomainLookupByName(vmName)
 	if err != nil {
 		log.Printf("SPICE proxy error: could not find VM %s on host %s: %v", vmName, hostID, err)
 		return
 	}
-	defer domain.Free()
 
 	// Get the VM's XML definition to find graphics details
-	xmlDesc, err := domain.GetXMLDesc(0)
+	xmlDesc, err := lvConn.DomainGetXMLDesc(domain, 0)
 	if err != nil {
 		log.Printf("SPICE proxy error: failed to get XML for %s: %v", vmName, err)
 		return
@@ -346,4 +344,5 @@ func HandleSpiceConsole(db *gorm.DB, connector *libvirt.Connector, w http.Respon
 	wg.Wait()
 	log.Printf("SPICE console proxy session ended for %s", vmName)
 }
+
 

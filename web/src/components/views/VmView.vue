@@ -9,8 +9,6 @@ const mainStore = useMainStore();
 const route = useRoute();
 const activeTab = ref('summary');
 
-let pollInterval = null;
-
 const vm = computed(() => {
     if (!route.params.vmName) return null;
     for (const host of mainStore.hosts) {
@@ -25,7 +23,29 @@ const host = computed(() => {
     return mainStore.hosts.find(h => h.vms && h.vms.some(v => v.name === vm.value.name));
 });
 
-const stats = computed(() => mainStore.activeVmStats);
+const uuidConflict = computed(() => {
+    if (!vm.value || !vm.value.uuid || !vm.value.domain_uuid) return false;
+    // A conflict exists if our internal UUID is different from the domain's UUID.
+    return vm.value.uuid !== vm.value.domain_uuid;
+});
+
+const stats = computed(() => {
+    const s = mainStore.activeVmStats;
+    if (s && host.value && vm.value && s.hostId === host.value.id && s.vmName === vm.value.name) {
+        return s.stats;
+    }
+    // Return a default structure if no stats are available to prevent template errors
+    return {
+        state: vm.value?.state ?? 'UNKNOWN',
+        max_mem: vm.value?.memory_bytes / 1024 ?? 0,
+        memory: 0,
+        vcpu: vm.value?.vcpu_count ?? 0,
+        cpu_time: 0,
+        disk_stats: [],
+        net_stats: []
+    };
+});
+
 const hardware = computed(() => mainStore.activeVmHardware);
 
 // --- Real-time Stat Calculation ---
@@ -38,7 +58,7 @@ const diskRates = ref({});
 const netRates = ref({});
 
 watch(stats, (newStats) => {
-    if (!newStats || newStats.state !== 1) {
+    if (!newStats || newStats.state !== 1) { // Libvirt state for running is 1
         cpuUsagePercent.value = 0;
         diskRates.value = {};
         netRates.value = {};
@@ -97,19 +117,27 @@ watch(stats, (newStats) => {
 
 
 const memoryUsagePercent = computed(() => {
-    if (!stats.value || !stats.value.max_mem || stats.value.state !== 1) return 0;
+    if (!stats.value || !stats.value.max_mem || vm.value.state !== 'ACTIVE') return 0;
+    // stats.memory is in KiB, stats.max_mem is also in KiB from libvirt
     return (stats.value.memory / stats.value.max_mem) * 100;
 });
 
 
 // --- Helper functions ---
 const stateText = (state) => {
-    const states = { 0: 'No State', 1: 'Running', 2: 'Blocked', 3: 'Paused', 4: 'Shutdown', 5: 'Shutoff', 6: 'Crashed', 7: 'PMSuspended' };
-    return states[state] || 'Unknown';
+    if (!state) return 'Unknown';
+    // Capitalize first letter, lowercase the rest
+    return state.charAt(0).toUpperCase() + state.slice(1).toLowerCase();
 };
 
 const stateColor = (state) => {
-  const colors = { 1: 'text-green-400 bg-green-900/50', 3: 'text-yellow-400 bg-yellow-900/50', 5: 'text-red-400 bg-red-900/50' };
+  const colors = {
+    'ACTIVE': 'text-green-400 bg-green-900/50',
+    'PAUSED': 'text-yellow-400 bg-yellow-900/50',
+    'STOPPED': 'text-red-400 bg-red-900/50',
+    'SUSPENDED': 'text-blue-400 bg-blue-900/50',
+    'ERROR': 'text-red-400 bg-red-900/50',
+  };
   return colors[state] || 'text-gray-400 bg-gray-700';
 };
 
@@ -149,15 +177,18 @@ const formatBps = (bytes) => {
 
 // --- Lifecycle & Data Fetching ---
 watch(activeTab, (newTab) => {
-    if (newTab === 'hardware' && vm.value && host.value) {
+    if (newTab === 'hardware' && vm.value && host.value && !hardware.value) {
         mainStore.fetchVmHardware(host.value.id, vm.value.name);
     }
 });
 
-watch(vm, (newVm) => {
-    clearInterval(pollInterval);
-    pollInterval = null;
-
+watch(vm, (newVm, oldVm) => {
+    // Unsubscribe from the old VM's stats
+    if (oldVm && host.value) {
+        mainStore.unsubscribeFromVmStats(host.value.id, oldVm.name);
+    }
+    
+    // Reset local state
     activeTab.value = 'summary';
     lastCpuTime.value = 0;
     lastCpuTimeTimestamp.value = 0;
@@ -170,21 +201,17 @@ watch(vm, (newVm) => {
     mainStore.activeVmHardware = null;
 
     if (newVm && host.value) {
-        mainStore.fetchVmStats(host.value.id, newVm.name);
-        pollInterval = setInterval(() => {
-            mainStore.fetchVmStats(host.value.id, newVm.name);
-        }, 2000);
+        // Subscribe to the new VM's stats
+        mainStore.subscribeToVmStats(host.value.id, newVm.name);
 
-        if (activeTab.value === 'hardware') {
-             mainStore.fetchVmHardware(host.value.id, newVm.name);
-        }
+        // No longer pre-fetch hardware. It will be fetched when the tab is clicked.
     }
 }, { immediate: true });
 
 onUnmounted(() => {
-    clearInterval(pollInterval);
-    mainStore.activeVmStats = null;
-    mainStore.activeVmHardware = null;
+    if (vm.value && host.value) {
+        mainStore.unsubscribeFromVmStats(host.value.id, vm.value.name);
+    }
 });
 
 </script>
@@ -192,7 +219,7 @@ onUnmounted(() => {
 <template>
   <div v-if="vm && host" class="flex flex-col h-full">
     <!-- Header -->
-    <div class="flex items-center justify-between mb-6">
+    <div class="flex items-center justify-between mb-2">
       <div class="flex items-center gap-4">
         <h1 class="text-3xl font-bold text-white">{{ vm.name }}</h1>
         <span 
@@ -203,8 +230,8 @@ onUnmounted(() => {
         </span>
       </div>
       <div class="flex items-center space-x-2">
-         <button v-if="vm.state === 5" @click="mainStore.startVm(host.id, vm.name)" class="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md transition-colors">Start</button>
-         <template v-if="vm.state === 1">
+         <button v-if="vm.state === 'STOPPED'" @click="mainStore.startVm(host.id, vm.name)" class="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md transition-colors">Start</button>
+         <template v-if="vm.state === 'ACTIVE'">
             <button @click="mainStore.gracefulShutdownVm(host.id, vm.name)" class="px-4 py-2 text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 rounded-md transition-colors">Shutdown</button>
             <button @click="mainStore.gracefulRebootVm(host.id, vm.name)" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors">Reboot</button>
             <button @click="mainStore.forceOffVm(host.id, vm.name)" class="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors">Force Off</button>
@@ -212,6 +239,23 @@ onUnmounted(() => {
       </div>
     </div>
     
+    <!-- UUID Conflict Warning -->
+    <div v-if="uuidConflict" class="mb-4 p-4 bg-yellow-900/50 border border-yellow-700 text-yellow-300 rounded-lg">
+        <div class="flex items-start">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-3 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+            <div>
+                <h3 class="font-bold">UUID Conflict Detected</h3>
+                <p class="text-sm mt-1">This VM's libvirt UUID (`{{ vm.domain_uuid }}`) is already in use by another VM in Virtumancer. To avoid conflicts, Virtumancer has assigned a new internal UUID (`{{ vm.uuid }}`).</p>
+                <p class="text-sm mt-2">It is highly recommended to update the VM's actual UUID in libvirt to match the internal one.</p>
+                <button class="mt-3 px-3 py-1.5 text-xs font-semibold text-white bg-yellow-600 hover:bg-yellow-700 rounded-md transition-colors">
+                    Update UUID in Libvirt
+                </button>
+                <p class="text-xs mt-1 text-yellow-400">Note: This action will require the VM to be stopped and started.</p>
+            </div>
+        </div>
+    </div>
+
+
     <!-- Tab Navigation -->
     <div class="border-b border-gray-700">
       <nav class="-mb-px flex space-x-8" aria-label="Tabs">
@@ -285,15 +329,16 @@ onUnmounted(() => {
           <dl class="space-y-4">
             <div> <dt class="text-sm font-medium text-gray-400">Host</dt> <dd class="mt-1 text-lg text-gray-200">{{ host.id }}</dd> </div>
             <div> <dt class="text-sm font-medium text-gray-400">Uptime</dt> <dd class="mt-1 text-lg text-gray-200">{{ formatUptime(vm.uptime) }}</dd> </div>
-             <div> <dt class="text-sm font-medium text-gray-400">vCPUs</dt> <dd class="mt-1 text-lg text-gray-200">{{ vm.vcpu }}</dd> </div>
-            <div> <dt class="text-sm font-medium text-gray-400">Memory</dt> <dd class="mt-1 text-lg text-gray-200">{{ formatMemory(vm.max_mem) }}</dd> </div>
+             <div> <dt class="text-sm font-medium text-gray-400">vCPUs</dt> <dd class="mt-1 text-lg text-gray-200">{{ vm.vcpu_count }}</dd> </div>
+            <div> <dt class="text-sm font-medium text-gray-400">Memory</dt> <dd class="mt-1 text-lg text-gray-200">{{ formatMemory(vm.memory_bytes / 1024) }}</dd> </div>
+            <div> <dt class="text-sm font-medium text-gray-400">Internal UUID</dt> <dd class="mt-1 text-xs font-mono text-gray-200">{{ vm.uuid }}</dd> </div>
           </dl>
         </div>
       </div>
 
       <!-- Console Tab -->
       <div v-if="activeTab === 'console'" class="h-full w-full">
-         <div v-if="vm.state !== 1" class="flex items-center justify-center h-full text-gray-500 bg-gray-900 rounded-lg">
+         <div v-if="vm.state !== 'ACTIVE'" class="flex items-center justify-center h-full text-gray-500 bg-gray-900 rounded-lg">
             <p>Console is only available when the VM is running.</p>
          </div>
          <div v-else class="h-full w-full bg-black rounded-lg overflow-hidden">
@@ -382,4 +427,5 @@ onUnmounted(() => {
     <p>Select a VM from the sidebar to view details, or the VM is still loading.</p>
   </div>
 </template>
+
 

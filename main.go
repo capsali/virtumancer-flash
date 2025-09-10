@@ -5,11 +5,11 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/capsali/virtumancer-flash/internal/api"
-	"github.com/capsali/virtumancer-flash/internal/libvirt"
-	"github.com/capsali/virtumancer-flash/internal/services"
-	"github.com/capsali/virtumancer-flash/internal/storage"
-	"github.com/capsali/virtumancer-flash/internal/ws"
+	"github.com/capsali/virtumancer/internal/api"
+	"github.com/capsali/virtumancer/internal/libvirt"
+	"github.com/capsali/virtumancer/internal/services"
+	"github.com/capsali/virtumancer/internal/storage"
+	"github.com/capsali/virtumancer/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )

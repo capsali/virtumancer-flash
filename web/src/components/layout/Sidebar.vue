@@ -45,7 +45,7 @@ function toggleHost(hostId) {
 }
 
 const runningVmsCount = (host) => {
-    return host.vms ? host.vms.filter(vm => vm.state === 1).length : 0;
+    return host.vms ? host.vms.filter(vm => vm.state === 'ACTIVE').length : 0;
 }
 </script>
 
@@ -102,8 +102,11 @@ const runningVmsCount = (host) => {
             <li v-for="vm in host.vms" :key="vm.name">
               <div @click="selectVm(vm)" class="flex items-center p-1.5 text-sm rounded-md cursor-pointer hover:bg-gray-700" :class="{'bg-gray-700/50': $route.params.vmName === vm.name}">
                 <span class="h-2 w-2 rounded-full mr-2 flex-shrink-0" :class="{
-                  'bg-green-500': vm.state === 1, 'bg-red-500': vm.state === 5,
-                  'bg-yellow-500': vm.state === 3, 'bg-gray-500': ![1,3,5].includes(vm.state)
+                  'bg-green-500': vm.state === 'ACTIVE', 
+                  'bg-red-500': vm.state === 'STOPPED' || vm.state === 'ERROR',
+                  'bg-yellow-500': vm.state === 'PAUSED',
+                  'bg-blue-500': vm.state === 'SUSPENDED',
+                  'bg-gray-500': !['ACTIVE', 'STOPPED', 'ERROR', 'PAUSED', 'SUSPENDED'].includes(vm.state)
                 }"></span>
                 <span class="truncate">{{ vm.name }}</span>
               </div>

@@ -18,11 +18,14 @@ const vms = computed(() => {
 });
 
 const totalMemory = computed(() => {
-    return selectedHost.value?.info?.memory * 1024 || 0;
+    return selectedHost.value?.info?.memory || 0; // Already in bytes from service layer
 });
 
 const usedMemory = computed(() => {
-    return vms.value.reduce((total, vm) => total + (vm.state === 1 ? vm.memory * 1024 : 0), 0);
+    if (!vms.value) return 0;
+    // memory_bytes is the max configured memory. We need live stats for current usage.
+    // This is a simplification. For now, we'll sum max memory of active VMs.
+    return vms.value.reduce((total, vm) => total + (vm.state === 'ACTIVE' ? vm.memory_bytes : 0), 0);
 });
 
 const memoryUsagePercent = computed(() => {
@@ -35,7 +38,8 @@ const totalCpu = computed(() => {
 });
 
 const usedCpu = computed(() => {
-    return vms.value.reduce((total, vm) => total + (vm.state === 1 ? vm.vcpu : 0), 0);
+    if (!vms.value) return 0;
+    return vms.value.reduce((total, vm) => total + (vm.state === 'ACTIVE' ? vm.vcpu_count : 0), 0);
 });
 
 const cpuUsagePercent = computed(() => {
@@ -50,25 +54,25 @@ const selectVm = (vmName) => {
 
 // Helper functions for display
 const stateText = (state) => {
-    const states = {
-        0: 'No State', 1: 'Running', 2: 'Blocked', 3: 'Paused',
-        4: 'Shutdown', 5: 'Shutoff', 6: 'Crashed', 7: 'PMSuspended',
-    };
-    return states[state] || 'Unknown';
+    if (!state) return 'Unknown';
+    // Capitalize first letter, lowercase the rest
+    return state.charAt(0).toUpperCase() + state.slice(1).toLowerCase();
 };
 
 const stateColor = (state) => {
   const colors = {
-    1: 'text-green-400 bg-green-900/50', // Running
-    3: 'text-yellow-400 bg-yellow-900/50', // Paused
-    5: 'text-red-400 bg-red-900/50', // Shutoff
+    'ACTIVE': 'text-green-400 bg-green-900/50',
+    'PAUSED': 'text-yellow-400 bg-yellow-900/50',
+    'STOPPED': 'text-red-400 bg-red-900/50',
+    'SUSPENDED': 'text-blue-400 bg-blue-900/50',
+    'ERROR': 'text-red-400 bg-red-900/50',
   };
   return colors[state] || 'text-gray-400 bg-gray-700';
 };
 
-const formatMemory = (kb) => {
-    if (kb === 0) return '0 MB';
-    const mb = kb / 1024;
+const formatMemory = (bytes) => {
+    if (bytes === 0) return '0 MB';
+    const mb = bytes / (1024 * 1024);
     if (mb < 1024) return `${mb.toFixed(0)} MB`;
     const gb = mb / 1024;
     return `${gb.toFixed(2)} GB`;
@@ -156,8 +160,11 @@ const formatBytes = (bytes, decimals = 2) => {
               <td class="px-6 py-4 whitespace-nowrap">
                 <div class="flex items-center">
                   <div class="h-2.5 w-2.5 rounded-full mr-3 flex-shrink-0" :class="{
-                    'bg-green-500': vm.state === 1, 'bg-red-500': vm.state === 5,
-                    'bg-yellow-500': vm.state === 3, 'bg-gray-500': ![1,3,5].includes(vm.state)
+                    'bg-green-500': vm.state === 'ACTIVE', 
+                    'bg-red-500': vm.state === 'STOPPED' || vm.state === 'ERROR',
+                    'bg-yellow-500': vm.state === 'PAUSED',
+                    'bg-blue-500': vm.state === 'SUSPENDED',
+                    'bg-gray-500': !['ACTIVE', 'STOPPED', 'ERROR', 'PAUSED', 'SUSPENDED'].includes(vm.state)
                   }"></div>
                   <div class="text-sm font-medium text-white">{{ vm.name }}</div>
                 </div>
@@ -167,8 +174,8 @@ const formatBytes = (bytes, decimals = 2) => {
                   {{ stateText(vm.state) }}
                 </span>
               </td>
-              <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">{{ vm.vcpu }}</td>
-              <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">{{ formatMemory(vm.max_mem) }}</td>
+              <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">{{ vm.vcpu_count }}</td>
+              <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">{{ formatMemory(vm.memory_bytes / 1024) }}</td>
             </tr>
           </tbody>
         </table>
@@ -179,4 +186,5 @@ const formatBytes = (bytes, decimals = 2) => {
     <p>Select a host from the sidebar to view details.</p>
   </div>
 </template>
+
 
