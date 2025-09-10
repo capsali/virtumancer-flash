@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/capsali/virtumancer/internal/console"
-	"github.com/capsali/virtumancer/internal/libvirt"
-	"github.com/capsali/virtumancer/internal/services"
-	"github.com/capsali/virtumancer/internal/storage"
-	"github.com/capsali/virtumancer/internal/ws"
+	"github.com/capsali/virtumancer-flash/internal/console"
+	"github.com/capsali/virtumancer-flash/internal/libvirt"
+	"github.com/capsali/virtumancer-flash/internal/services"
+	"github.com/capsali/virtumancer-flash/internal/storage"
+	"github.com/capsali/virtumancer-flash/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )

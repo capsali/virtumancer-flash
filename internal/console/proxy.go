@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/capsali/virtumancer/internal/libvirt"
-	"github.com/capsali/virtumancer/internal/storage"
+	"github.com/capsali/virtumancer-flash/internal/libvirt"
+	"github.com/capsali/virtumancer-flash/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"

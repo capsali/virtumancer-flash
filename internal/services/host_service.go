@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/capsali/virtumancer/internal/libvirt"
-	"github.com/capsali/virtumancer/internal/storage"
-	"github.com/capsali/virtumancer/internal/ws"
+	"github.com/capsali/virtumancer-flash/internal/libvirt"
+	"github.com/capsali/virtumancer-flash/internal/storage"
+	"github.com/capsali/virtumancer-flash/internal/ws"
 	golibvirt "github.com/digitalocean/go-libvirt"
 	"github.com/google/uuid"
 	"gorm.io/gorm"

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/capsali/virtumancer/internal/storage"
+	"github.com/capsali/virtumancer-flash/internal/storage"
 	"github.com/digitalocean/go-libvirt"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
